@@ -1,0 +1,27 @@
+#!/usr/bin/perl -wT
+################################################################################
+
+my ($host) = shift;
+
+if (!$host) {
+  print "$0: [host] required\n";
+  exit (3);
+}
+else { if ($host =~ m/^([\w\.\-]+)$/) { $host = $1; } }
+
+delete @ENV{'IFS', 'CDPATH', 'PATH', 'ENV', 'BASH_ENV'};
+
+if ( open(PING,"/bin/ping -w 4 -c 2 $host|") ) {
+  while(<PING>) {
+    if (m#round-trip min/avg/max = (\d+)\.\d+/(\d+)\.\d+/(\d+)\.\d+ ms#) {
+      my ($min,$avg,$max) = ($1,$2,$3);
+      #print "ok $min:$max:$avg\n";
+      print "ok\n";
+      exit (0);
+    }
+  }
+  close(PING);
+}
+
+print "fail\n";
+exit (1);

@@ -1,0 +1,42 @@
+#!/usr/bin/perl -wT
+################################################################################
+
+use IO::Socket; 
+
+my ($port) = shift;
+my ($page) = shift; 
+my ($vhost) = shift;
+my ($host) = shift;
+
+if (!$host || !$vhost || !$port || !$page) {
+  print "$0: [port page vhost host] required\n";
+  exit (3);
+}
+else {
+  $vhost = $host if (!$vhost);
+  if ($host =~ m/^([\w\.\-]+)$/) { $host = $1; }
+  if ($vhost =~ m/^([\w\.\-]+)$/) { $vhost = $1; }
+  if ($port =~ m/^(\d+)$/) { $port = $1; }
+  if ($page =~ m/^([\/\w\.\-\?]+)$/) { $page = $1; }
+}
+
+my $local = IO::Socket::INET->new(Proto   =>"tcp",
+                                  PeerAddr=>"$host",
+                                  PeerPort=>"$port",
+                                  Timeout =>1);
+if ($local) {
+  print $local "GET /$page HTTP/1.0\nHost:$vhost\nConnection:close\n\n";
+  while (<$local>) {
+    #print $_;
+    s/^\s+//;
+    s/\s+$//;
+    if ($_ =~ /^0 OK$/) {
+      print "ok\n";
+      exit(0);
+    }
+  }
+  close($local);
+}     
+
+print "fail\n";
+exit (1);

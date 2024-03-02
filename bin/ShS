@@ -1,0 +1,348 @@
+#!/usr/bin/perl -wT
+# by Omar Al-Sakka
+################################################################################
+
+################################################################################
+### Modules
+################################################################################
+use Getopt::Std;
+use strict;
+use Data::Dumper;
+
+################################################################################
+### Globals.
+################################################################################
+my $config_file = "/usr/local/pkg/ShS/etc/simple.conf";
+my %h;
+my %c;
+
+###############################################################################
+### Log to a File.
+###############################################################################
+sub logger ($) {
+  my ($mess) = @_;
+  my $current_date = scalar localtime(time);
+
+  if ( open(LOG, ">>$h{log_file}") ) {
+    print LOG "$current_date:[$$] $mess\n";
+    close (LOG);
+  } else { sdie ("cannot write to log file '$h{log_file}'"); }
+}
+
+###############################################################################
+### Print Message and Exit.
+###############################################################################
+sub sdie ($) {
+  print qq|$h{SELF}: @_.\n|;
+  &logger (qq|@_|);
+  exit(1);
+}
+
+###############################################################################
+### Read in Config File.
+###############################################################################
+sub config_slurp ($$) {
+  my ($file, $hash) = @_;
+  my $service = 0;
+  my $server;
+
+  &sdie ("invalid slurp filename") if ( ! $file =~ m/^([\w\.]+)$/ );
+  if ( open (CFG, "$file") ) {
+    while (<CFG>) {
+      chomp ($_);
+      s/[\n|\r]$//g;
+      s/[\s|\t]/ /;   
+      s/\s+$//g;  
+      s/^\s+//g;          
+      next if /^\s*[\;\#]/;
+      next if /^\s*$/;
+      if (/^\s*(\w+)\s*\{\s*$/) { 
+        sdie ("duplicate service line $.") if (defined($$hash{SERVICE}{$1}));
+        $service = "$1"; 
+        next; 
+      }
+      elsif (/^\s*\}\s*$/) { $service = 0; next; }
+      elsif (/^\s*([\w\[\]]+)\s*=?\s*[\"|\']?([\:\,\s\w\-\/\.]+)[\"|\']?;?$/) { 
+        $server = $2;
+        if ($service) { 
+          if ($1 =~ m/\s*[s|S][e|E][r|R][v|V][e|E][r|R]\s*\[(\d+)\]\s*$/) {
+            $$hash{SERVICE}{$service}{server}{lc($1)} = "$server";
+          } else { $$hash{SERVICE}{$service}{lc($1)} = "$2"; }
+        } else { $$hash{lc($1)} = "$2"; }
+        next; 
+      }
+      sdie ("syntax error, line $. of configuration");
+    } 
+    close (CFG);
+    sdie ("unterminated service '$service'") if ($service);
+  } else { sdie ("opening configuration '$file' failed"); }
+}
+
+###############################################################################
+### Execute Remote Command.
+### Perl Style Return unlike Modules.
+###############################################################################
+sub cmd_exec ($) {
+  my ($param) = @_;
+  my $retval = 0;
+
+  #logger ("\t  EXEC: $param");
+  if ( open(TEST,"$param|") ) {
+    while(<TEST>) { 
+      chomp ($_); 
+      #logger ("DEBUG: $_"); 
+      $retval = 1 if (m/^ok$/); 
+    }
+    close(TEST);
+  }
+  return $retval;
+}
+
+###############################################################################
+### Sleep For Duration based on Priority.
+###############################################################################
+sub rsleep ($) {
+  my ($priority) = @_;
+  my ($sleep, $rsleep);
+
+  $rsleep = rand($$);
+  $rsleep =~ s/\.//g;
+  $rsleep = substr($rsleep, 0, 1);
+  $sleep = $priority + $rsleep;
+  logger ("\t  delay $sleep seconds");
+  sleep ($sleep);
+}
+
+###############################################################################
+### Check Config.
+###############################################################################
+sub check_config ($) {
+  my ($out) = @_;
+  my $ok = 1;
+
+  $ok = 0 if (!defined($h{SERVICE}{$out}{interface}));
+  $ok = 0 if (!defined($h{SERVICE}{$out}{sub_interface}));
+  $ok = 0 if (!defined($h{SERVICE}{$out}{vip}));
+  $ok = 0 if (!defined($h{SERVICE}{$out}{local_mac}));
+  $ok = 0 if (!defined($h{SERVICE}{$out}{gateway}));
+  if (defined($h{SERVICE}{$out}{check})) {
+    if ( ! -f "$h{modules_dir}/$h{SERVICE}{$out}{check}.ShS" ) {
+      logger ("unknown module '$h{SERVICE}{$out}{check}', service: $out");
+      $ok = 0;
+    }
+    else {
+      $c{check} = "$h{modules_dir}/$h{SERVICE}{$out}{check}.ShS";
+      if (defined($h{SERVICE}{$out}{check_opts})) {
+        $c{check} .= " $h{SERVICE}{$out}{check_opts}";
+      }
+    }
+  } else { $ok = 0; }
+  $h{SERVICE}{$out}{priority} = 1 if (!defined($h{SERVICE}{$out}{priority}));
+  $h{SERVICE}{$out}{retries} = 3 if (!defined($h{SERVICE}{$out}{retries}));
+  $h{SERVICE}{$out}{STATUS} = 0 if (!defined($h{SERVICE}{$out}{STATUS}));
+  $h{SERVICE}{$out}{BACKUP} = 0 if (!defined($h{SERVICE}{$out}{BACKUP}));
+  $h{SERVICE}{$out}{mask} = "255.255.255.0"
+    if (!defined($h{SERVICE}{$out}{mask}));
+  $h{SERVICE}{$out}{vmac} = "01:01:01:01:01:01"
+    if (!defined($h{SERVICE}{$out}{vmac}));
+  $c{int} = $h{SERVICE}{$out}{interface};
+  $c{sint} = $h{SERVICE}{$out}{sub_interface};
+  $c{vip} = $h{SERVICE}{$out}{vip};
+  $c{mask} = $h{SERVICE}{$out}{mask};
+  $c{gw} = $h{SERVICE}{$out}{gateway};
+  $c{retries} = $h{SERVICE}{$out}{retries} + $h{SERVICE}{$out}{priority};
+  $c{snum} = "$h{SERVICE}{$out}{local_server}";
+  $c{vmac} = "$h{SERVICE}{$out}{vmac}";
+  $c{local_mac} = "$h{SERVICE}{$out}{local_mac}";
+  $h{SERVICE}{$out}{HOST_COUNT} = 0;
+  foreach my $in (sort keys %{$h{SERVICE}{$out}{server}}) {
+    $h{SERVICE}{$out}{HOST_COUNT}++;
+    if (!defined($h{SERVICE}{$out}{local_server})) {
+      $h{SERVICE}{$out}{local_server} = $in;
+      $c{snum} = "$h{SERVICE}{$out}{local_server}";
+    }
+  }
+  $c{rip} = "$h{SERVICE}{$out}{server}{ $c{snum} }";
+  $c{sch} = "$c{int} $c{sint} $c{rip} $c{vip} $c{mask} "
+          . "$c{local_mac} $c{vmac} $c{gw}";
+  return $ok
+}
+
+###############################################################################
+### VIP OK.
+###############################################################################
+sub vip_ok ($) {
+  my ($out) = @_;
+
+  logger ("\t  * vip ok");
+  $h{SERVICE}{$out}{STATUS} = 0;
+  $h{SERVICE}{$out}{BACKUP} = 0;
+}
+
+###############################################################################
+### VIP Fail.
+###############################################################################
+sub vip_fail {
+  my ($out) = @_;
+
+  logger ("\t  * vip fail [$h{SERVICE}{$out}{STATUS}]");
+  ### It's down, make sure.
+  if (!$h{SERVICE}{$out}{BACKUP}) {
+    if ( &cmd_exec ("$h{modules_dir}/$h{state_changer} backup $c{sch}") ) {
+      $h{SERVICE}{$out}{BACKUP} = 1;
+      logger ("\t  local backup");
+    } else { logger ("\t  local backup fail"); }
+  }
+  ### Remote VIP fail.
+  if ( &cmd_exec ("$c{check} $c{rip}") ) {
+    logger ("\t  remote fail");
+    if ( $h{SERVICE}{$out}{STATUS} gt $c{retries} ) {
+      logger ("\t  local active server");
+      &cmd_exec ("$h{modules_dir}/$h{state_changer} active $c{sch}");
+      $h{SERVICE}{$out}{STATUS} = -1;
+    }
+  }
+  ### Local VIP fail.
+  else {
+    logger ("\t  local fail");
+    if ( $h{SERVICE}{$out}{STATUS} gt $c{retries} ) {
+      logger ("\t  resetting retry counter");
+      $h{SERVICE}{$out}{STATUS} = -1;
+    }
+  }
+  rsleep($h{SERVICE}{$out}{priority})
+    if ( $h{SERVICE}{$out}{STATUS} != -1 );
+  $h{SERVICE}{$out}{STATUS}++;
+}
+
+###############################################################################
+### Service Checker.
+### Currently Dependant on Global %h.
+###############################################################################
+sub service_checker ($) {
+  my ($sleep_time) = @_;
+  my ($in, $out);
+
+  sdie("no state changer defined") if (!defined($h{state_changer}));
+  sdie ("state changer not executable") 
+    if ( ! -f "$h{modules_dir}/$h{state_changer}" );
+  foreach my $out (sort keys %{$h{SERVICE}}) {
+    logger ('');
+    if (check_config($out)) { 
+      logger ("--> vip $c{vip}");
+      logger ("    service [$out], module '$h{SERVICE}{$out}{check}'");
+      if ( &cmd_exec ("$c{check} $c{vip}") ) { vip_ok($out); }
+      else { vip_fail($out); }
+      sleep($sleep_time);
+    } else { logger ("bypassing service [$out], incomplete config"); }
+  }
+  return 1;
+}
+
+###############################################################################
+### Locking Functions: 1 Lock, ? Verify, 0 Unlock.
+###############################################################################
+sub lock ($$) {
+  my ($file, $action) = @_;
+
+  if ($action eq "?") {
+    if ( open (LOCK, "$file") ) {
+      while (<LOCK>) { 
+        chomp($_);  
+        if ($_ =~ m/^(\d+)$/) { return $1; }
+        else { sdie ("invalid data in lock file"); }
+      }
+      close (LOCK);
+    } 
+    return -1;
+  }
+  elsif ($action) {
+    if ( open (LOCK, "> $file") ) {
+      print LOCK "$$\n";
+      close (LOCK);
+      return 1;
+    } 
+  }
+  else { return 1 if ( unlink ("$file") ); }
+  return 0;
+}
+
+###############################################################################
+### Terminate Daemon.
+###############################################################################
+sub terminate ($) {
+  my ($lock_file) = @_;
+  my $tpid;
+
+  $tpid  = &lock("$lock_file", "?");
+  if ( &lock("$lock_file", "0") ) {
+    kill ("SIGHUP", "$tpid") or sdie ("cannot kill daemon [$tpid]");
+    sdie ("daemon terminated [$tpid]");
+  }
+  sdie ("daemon not running");
+}
+
+###############################################################################
+### Main Code.
+###############################################################################
+sub engine ($$) {
+  my ($lock_file, $sleep_timer, $sub_sleep_timer) = @_;
+  my $tpid;
+  my $ftpid;
+
+  $tpid  = "/proc/" . &lock("$lock_file", "?");
+  if ( -e "$tpid" ) { sdie ("daemon already running"); }
+  else {
+    print qq|$0: starting daemon [$$]\n|;
+    close (STDOUT);
+    close (STDERR);
+    fork && return 0;
+    if (&lock ("$lock_file", "1")) {
+      while ( &lock("$lock_file", "?") eq "$$" ) {
+        $0 = 'ShS [running service checks]';
+        &service_checker ($sub_sleep_timer);
+        $0 = 'ShS [idle...]';
+        sleep($sleep_timer);
+      }
+    } else { sdie ("failed to lock daemon"); }
+  }
+  return 1;
+}
+
+###############################################################################
+### Help.
+###############################################################################
+sub help {
+  print qq|\n  $h{SELF}
+  -d  daemonize.
+  -t  terminate.
+  -c  specify a configuration file.\n\n|;
+}
+
+################################################################################
+# Start it all here
+################################################################################
+main: {
+  my %opt;
+  my $vopts = "dthc:";
+  my $retval = 1;
+
+  $|++;
+  $h{SELF} = $0;
+  $0 = 'ShS [init]';
+  $h{cycle_time} = 10;
+  $h{sub_cycle_time} = 2;
+  $opt{c} = $config_file;
+  delete @ENV{'IFS', 'CDPATH', 'PATH', 'ENV', 'BASH_ENV'};
+  getopts($vopts, \%opt);
+  &config_slurp($opt{c}, \%h);
+
+  if ($opt{h}) { &help; }
+  elsif ($opt{t}) { &terminate($h{lock_file}); }
+  elsif ($opt{d}) { 
+    $retval = &engine($h{lock_file}, $h{cycle_time}, $h{sub_cycle_time}); 
+  }
+  else { print "usage: $h{SELF}: [-$vopts]\n"; }
+
+  exit ($retval);
+}
